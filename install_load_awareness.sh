@@ -1,5 +1,10 @@
 # !/bin/bash
 
-cd ./load_awareness_module
-echo 'shanqian' | sudo -S make
-sudo insmod load_awareness_module.ko
+currentpath=$(pwd)
+
+# ./compile_kernel.sh
+
+cd $currentpath/load_awareness_module
+
+make 
+echo 'shanqian' | sudo -S insmod load_awareness_module.ko
