@@ -1,9 +1,11 @@
 /**
- * there are 2 kprobes:
- * 1. before calling ip_init() in ip_output.c
- * 		define netlink sockets and its functionality
- * 2. before callint ip_output() in ip_output.c
+ * there is 1 kprobes:
+ * 1. before callint ip_output() in ip_output.c
  * 		check current queue occupation and might send netlink message to user space
+ * 
+ * the definition of netlink sockets and its functionality is embedded in kernel source code,
+ * because it must be called when the ipv4 module is being initiate,
+ * so it is hard to implement through loadable kernel module (LKM)
  */
 
 #include <linux/module.h>
@@ -25,85 +27,9 @@
 
 const char interface_names[4][5] = {"eth1", "eth2", "eth3", "eth4"};
 
-/** 
- * receive qlen_amplitude_threshold of LoFi, which is sent from user space
- * */
-static void netlink_recv_delta(struct sk_buff *skb)
-{
-	if (skb->len >= nlmsg_total_size(0)) {
-		struct nlmsghdr *hdr = nlmsg_hdr(skb);
-		__u32 qlen_amplitude_threshold = 0x3f3f3f3f;
-
-		if (nlmsg_len(hdr) != sizeof(qlen_amplitude_threshold)) {
-			pr_err("%s: netlink payload error\n", __func__);
-			return;
-		}
-
-		qlen_amplitude_threshold = *((__u32 *)NLMSG_DATA(hdr));
-		// pr_info("%s qlen_amplitude_threshold: %u\n", __func__, qlen_amplitude_threshold);
-
-		sock_net(skb->sk)->qlen_amplitude_threshold = qlen_amplitude_threshold;
-	}
-	else {
-		pr_err("%s skb error!\n", __func__);
-	}
-}
-
-/** 
- * imitates network namespace operations in rtnetlink.c
- * */
-static int __net_init recv_packet_net_init(struct net *net)
-{
-	struct netlink_kernel_cfg cfg;
-	struct sock* nl_sk;
-
-	memset(&cfg, 0, sizeof(struct netlink_kernel_cfg));
-
-	cfg.groups = 1;
-	cfg.input = netlink_recv_delta;
-
-	nl_sk = netlink_kernel_create(net, NETLINK_RECV_PACKET, &cfg);
-
-	if (nl_sk == NULL) {
-		pr_err("%s netlink_kernel_create failed\n", __func__);
-		return -1;
-	}
-
-	net->recv_packet_nl_sock = nl_sk;
-
-	return 0;
-}
-
-static void __net_exit recv_packet_net_exit(struct net *net)
-{
-	netlink_kernel_release(net->recv_packet_nl_sock);
-	net->recv_packet_nl_sock = NULL;
-}
-
-// used to init netlink socket
-static struct pernet_operations recv_packet_net_ops = {
-	.init = recv_packet_net_init,
-	.exit = recv_packet_net_exit,
-};
-
-
-static struct kprobe kp_ip_init = {
-    .symbol_name = "ip_init",
-},
-kp_ip_output = {
+static struct kprobe kp_ip_output = {
     .symbol_name = "ip_output",
 };
-
-static int __kprobes handler_pre_ip_init(struct kprobe *p, struct pt_regs *regs)
-{
-    register_pernet_subsys(&recv_packet_net_ops);
-    return 0;   
-    /**
-     * if return -1, 
-     * then the wrapped funtion (i.e., original funtion in kernel)
-     * won't be called
-     */
-}
 
 static int __kprobes handler_pre_ip_output(struct kprobe *p, struct pt_regs *regs)
 {
@@ -138,7 +64,7 @@ static int __kprobes handler_pre_ip_output(struct kprobe *p, struct pt_regs *reg
 			rcu_read_unlock();
 			dev_put(dev);
 		}
-		// pr_info("%s handle:%x qlen_list[%d]:[%d]\n", __func__, handle, i, qlen_list[i]);
+		pr_info("%s handle:%x qlen_list[%d]:[%d]\n", __func__, handle, i, qlen_list[i]);
 	}
 
 	for (i = 0; i < 4; ++i) {
@@ -183,22 +109,13 @@ static int __init load_awareness_module_init(void)
 {
     int ret;
 
-    kp_ip_init.pre_handler = handler_pre_ip_init;
-    ret = register_kprobe(&kp_ip_init);
-    if (ret < 0) {
-        pr_err("register_kprobe kp_ip_init failed\n");
-    }
-    else {
-        pr_info("planted kprobe at %p\n", kp_ip_init.addr);
-    }
-
     kp_ip_output.pre_handler = handler_pre_ip_output;
     ret = register_kprobe(&kp_ip_output);
 	if (ret < 0) {
         pr_err("register_kprobe ip_output failed\n");
     }
     else {
-        pr_info("planted kprobe at %p\n", kp_ip_init.addr);
+        pr_info("planted kprobe at %p\n", kp_ip_output.addr);
     }
 
     return 0;
@@ -206,7 +123,6 @@ static int __init load_awareness_module_init(void)
 
 static void __exit load_awareness_module_exit(void)
 {
-    unregister_kprobe(&kp_ip_init);
 	unregister_kprobe(&kp_ip_output);
     pr_info("unregisterd kprobe\n");
 }
