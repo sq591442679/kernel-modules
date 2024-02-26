@@ -44,6 +44,10 @@ static int __kprobes handler_pre_ip_output(struct kprobe *p, struct pt_regs *reg
 	bool should_change_cost = false;
 	struct Qdisc *qdisc;
 
+	if (net == &init_net) {
+		return 0;
+	}
+
 	/** 
 	 * @sqsq 
 	 * query qlen of 4 interfaces
@@ -105,6 +109,69 @@ static int __kprobes handler_pre_ip_output(struct kprobe *p, struct pt_regs *reg
     return 0;   
 }
 
+/** 
+ * receive qlen_amplitude_threshold of LoFi, which is sent from user space
+ * */
+static void netlink_recv_delta(struct sk_buff *skb)
+{
+	if (skb->len >= nlmsg_total_size(0)) {
+		struct nlmsghdr *hdr = nlmsg_hdr(skb);
+		__u32 qlen_amplitude_threshold = 0x3f3f3f3f;
+
+		if (nlmsg_len(hdr) != sizeof(qlen_amplitude_threshold)) {
+			pr_err("%s: netlink payload error\n", __func__);
+			return;
+		}
+
+		qlen_amplitude_threshold = *((__u32 *)NLMSG_DATA(hdr));
+		// pr_info("%s qlen_amplitude_threshold: %u\n", __func__, qlen_amplitude_threshold);
+
+		sock_net(skb->sk)->qlen_amplitude_threshold = qlen_amplitude_threshold;
+	}
+	else {
+		pr_err("%s skb error!\n", __func__);
+	}
+}
+
+static void init_netlink_sockets(void)
+{
+	struct net *net;
+	for_each_net(net) {
+		if (net != &init_net) {
+			struct netlink_kernel_cfg cfg;
+			struct sock* nl_sk;
+
+			memset(&cfg, 0, sizeof(struct netlink_kernel_cfg));
+
+			cfg.groups = 1;
+			cfg.input = netlink_recv_delta;
+
+			nl_sk = netlink_kernel_create(net, NETLINK_RECV_PACKET, &cfg);
+
+			if (nl_sk == NULL) {
+				pr_err("%s netlink_kernel_create failed\n", __func__);
+			}
+			else {
+				pr_info("%s netlink_kernel_create succeed\n", __func__);
+			}
+
+			net->recv_packet_nl_sock = nl_sk;		
+		}	
+	}
+}
+
+static void release_netlink_sockets(void)
+{
+	struct net *net;
+	for_each_net(net) {
+		if (net != &init_net) {
+			netlink_kernel_release(net->recv_packet_nl_sock);
+			net->recv_packet_nl_sock = NULL;	
+		}
+	}
+}
+
+
 static int __init load_awareness_module_init(void)
 {
     int ret;
@@ -118,13 +185,18 @@ static int __init load_awareness_module_init(void)
         pr_info("planted kprobe at %p\n", kp_ip_output.addr);
     }
 
+	init_netlink_sockets();
+
     return 0;
 } 
 
 static void __exit load_awareness_module_exit(void)
 {
 	unregister_kprobe(&kp_ip_output);
-    pr_info("unregisterd kprobe\n");
+
+	release_netlink_sockets();
+
+    pr_info("%s	unregisterd kprobe\n", __func__);
 }
 
 module_init(load_awareness_module_init);
